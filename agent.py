@@ -3,55 +3,107 @@ import re
 from llm import chat
 from tools.base import Registry
 from tools.fs import ReadFile
-from tools.web import WebFetch, WebDo
+from tools.web import WebTool
+from tools.writefile import WriteFile
 
 def build_registry() -> Registry:
     reg = Registry()
     reg.add(ReadFile())
-    reg.add(WebFetch())
-    reg.add(WebDo())
+    reg.add(WebTool())
+    reg.add(WriteFile())
     return reg
 
-SYSTEM_PROMPT = """你是本地编程助手。你可以使用以下工具：
-- read_file: 读取文件内容，参数 path
-- web_fetch: 访问网页获取纯文本，参数 url
-- web_do: 操作浏览器网页，参数 action（navigate/click/type/read/screenshot）及对应参数
+SYSTEM_PROMPT = """你是本地编程助手，可以用工具完成文件读写和网页操作。
 
-当需要调用工具时，严格按以下格式输出（不要加其他内容）：
+## 工具说明
 
+### read_file
+读取本地文件内容。
+参数：path（文件路径，必填）
+
+### writefile
+创建或覆盖写入文件，传入文件路径和内容
+参数：path（文件路径，必填）
+
+### web
+网页工具，通过 action 参数选择操作：
+- fetch    抓取网页纯文本        参数：url
+- navigate 浏览器打开网页        参数：url
+- type     在输入框中填写内容     参数：selector（CSS选择器）+ text（输入内容）
+- click    点击按钮/链接         参数：selector（CSS选择器）
+- read     读取当前页面纯文本     无额外参数
+
+## 网页操作流程
+
+登录网站等复杂操作必须分步执行，每步一次工具调用：
+1. 先 navigate 打开目标网址
+2. 再 type 填写账号、密码等
+3. 然后 click 点击登录/提交按钮
+4. 最后 read 读取结果页面
+
+收到每一步的工具返回结果后，再执行下一步。
+
+## 输出格式
+
+调用工具时严格输出：
 <tool_call>
-{"name": "工具名", "arguments": {"参数": "值"}}
+{"name": "工具名", "arguments": {"参数名": "参数值"}}
 </tool_call>
 
-每次只能调用一个工具。收到工具结果后继续对话。用中文回复。"""
+不调用工具时直接文本回复。用中文回复。"""
 
 # 兜底：从文本中解析 tool_call（qwen2.5:7b 不支持原生 tool_calls）
 TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*\n?\s*(.*?)\s*\n?\s*</tool_call>", re.DOTALL
 )
-# 匹配裸 {"name": "...", "arguments": {...}} 格式的 JSON
-RAW_TOOL_JSON_RE = re.compile(
-    r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:(.*?)\}\s*$', re.DOTALL
-)
 
-def parse_tool_call(text: str):
-    """从文本中提取 JSON 工具调用，先试 <tool_call> 标签，再试裸 JSON"""
-    m = TOOL_CALL_RE.search(text)
-    if m:
+def _find_json_blocks(text: str):
+    """用大括号计数提取所有顶层 JSON 对象"""
+    results = []
+    i = 0
+    while i < len(text):
+        # 找 {"name":
+        start = text.find('{"name":', i)
+        if start == -1:
+            break
+        depth = 0
+        j = start
+        while j < len(text):
+            c = text[j]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    results.append(text[start:j + 1])
+                    i = j + 1
+                    break
+            j += 1
+        else:
+            # 没找到配对的 }
+            break
+    return results
+
+def parse_tool_calls(text: str):
+    """从文本中提取所有工具调用"""
+    calls = []
+    # 1. <tool_call> 标签
+    for m in TOOL_CALL_RE.finditer(text):
         try:
-            return json.loads(m.group(1))
+            calls.append(json.loads(m.group(1)))
         except json.JSONDecodeError:
             pass
-    # 裸 JSON 兜底
-    m = RAW_TOOL_JSON_RE.search(text)
-    if m:
-        name = m.group(1)
+    if calls:
+        return calls
+    # 2. 裸 JSON 括号配对
+    for block in _find_json_blocks(text):
         try:
-            args = json.loads(m.group(2))
+            obj = json.loads(block)
+            if "name" in obj and "arguments" in obj:
+                calls.append(obj)
         except json.JSONDecodeError:
-            args = {}
-        return {"name": name, "arguments": args}
-    return None
+            pass
+    return calls
 
 def run_agent(user_text: str):
     reg = build_registry()
@@ -69,12 +121,12 @@ def run_agent(user_text: str):
         # 优先用原生 tool_calls
         tool_calls_raw = msg.get("tool_calls") or []
 
-        # 兜底：从 content 文本解析 <tool_call>
-        parsed = None
+        # 兜底：从 content 文本解析
+        parsed = []
         if not tool_calls_raw and content:
-            parsed = parse_tool_call(content)
+            parsed = parse_tool_calls(content)
             if parsed:
-                tool_calls_raw = [{"function": parsed}]
+                tool_calls_raw = [{"function": p} for p in parsed]
 
         # 既没有原生 tool_calls 也没有文本解析到 → 结束
         if not tool_calls_raw:
@@ -83,7 +135,10 @@ def run_agent(user_text: str):
             break
 
         # 打印非 tool_call 部分的文本
-        clean = TOOL_CALL_RE.sub("", content).strip()
+        clean = TOOL_CALL_RE.sub("", content)
+        for block in _find_json_blocks(content):
+            clean = clean.replace(block, "")
+        clean = clean.strip()
         if clean:
             print("assistant>", clean)
 

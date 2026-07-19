@@ -2,99 +2,78 @@ import re
 import httpx
 from tools.base import Tool
 
-# ── 只读：抓取网页文本 ──
-
-class WebFetch(Tool):
-    name = "web_fetch"
-    description = "访问网页获取纯文本内容，只读不操作"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "网页 URL"},
-        },
-        "required": ["url"],
-    }
-
-    def run(self, args: dict) -> str:
-        url = args["url"]
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
-            r = client.get(url)
-        r.raise_for_status()
-        text = re.sub(r"<script[^>]*>.*?</script>", "", r.text, flags=re.DOTALL | re.I)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.I)
-        text = re.sub(r"<[^>]+>", "\n", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text[:30000]
-
-
-# ── 交互操作：浏览器自动化 ──
-
 try:
     from playwright.sync_api import sync_playwright
     _playwright = sync_playwright().start()
-    _browser = _playwright.chromium.launch(headless=True)
+    _browser = _playwright.chromium.launch(headless=False)
     _page = _browser.new_page()
     _HAS_PLAYWRIGHT = True
 except Exception:
     _HAS_PLAYWRIGHT = False
 
 
-class WebDo(Tool):
-    """
-    操作网页：导航、点击、输入、读取页面内容。
-    依赖：pip install playwright && playwright install chromium
-    """
-    name = "web_do"
+class WebTool(Tool):
+    name = "web"
     description = (
-        "操作浏览器网页，支持的动作(action):\n"
-        "  navigate - 打开 URL，参数 url\n"
-        "  click    - 点击元素，参数 selector (CSS选择器，如 '#login', 'button.submit')\n"
-        "  type     - 在输入框填内容，参数 selector + text\n"
-        "  read     - 读取当前页面纯文本\n"
-        "  screenshot - 截屏(返回文件路径)，参数 path(可选)"
+        "网页工具，通过 action 选择模式：\n"
+        "  fetch     - 快速抓取网页纯文本（参数 url）\n"
+        "  navigate  - 浏览器打开 URL（参数 url）\n"
+        "  click     - 点击元素（参数 selector）\n"
+        "  type      - 输入文本（参数 selector + text）\n"
+        "  read      - 读取当前页面纯文本\n"
+        "  screenshot - 截图（参数 path，可选）"
     )
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["navigate", "click", "type", "read", "screenshot"],
-                "description": "要执行的动作",
+                "enum": ["fetch", "navigate", "click", "type", "read", "screenshot"],
+                "description": "操作模式",
             },
-            "url": {"type": "string", "description": "[navigate] 目标网址"},
-            "selector": {"type": "string", "description": "[click/type] CSS 选择器"},
-            "text": {"type": "string", "description": "[type] 要输入的文本"},
-            "path": {"type": "string", "description": "[screenshot] 截图保存路径，默认 screenshot.png"},
+            "url": {"type": "string", "description": "网址"},
+            "selector": {"type": "string", "description": "CSS 选择器"},
+            "text": {"type": "string", "description": "要输入的文本"},
+            "path": {"type": "string", "description": "截图保存路径"},
         },
         "required": ["action"],
     }
 
     def run(self, args: dict) -> str:
-        if not _HAS_PLAYWRIGHT:
-            return "ERROR: playwright 未安装。运行: pip install playwright && playwright install chromium"
-
-        global _page
         action = args["action"]
 
+        # ── fetch 模式：httpx 抓取 ──
+        if action == "fetch":
+            url = args.get("url", "")
+            if not url:
+                return "ERROR: fetch 需要 url 参数"
+            with httpx.Client(timeout=30, follow_redirects=True) as client:
+                r = client.get(url)
+            r.raise_for_status()
+            text = self._extract_text(r.text)
+            return text[:30000]
+
+        # ── 其余模式：Playwright ──
+        if not _HAS_PLAYWRIGHT:
+            return "ERROR: playwright 未安装。运行: pip install playwright; python -m playwright install chromium"
+
+        global _page
+
         if action == "navigate":
-            _page.goto(args["url"], timeout=30000)
-            return f"已打开 {args['url']}\n页面标题: {_page.title()}"
+            _page.goto(args.get("url", ""), timeout=30000)
+            return f"已打开 {args.get('url')}\n页面标题: {_page.title()}\n\n可交互元素:\n{self._list_elements()}"
 
         elif action == "click":
-            _page.click(args["selector"], timeout=10000)
+            _page.click(args.get("selector", ""), timeout=10000)
             _page.wait_for_load_state("networkidle")
-            return f"已点击 {args['selector']}"
+            return f"已点击 {args.get('selector')}"
 
         elif action == "type":
-            _page.fill(args["selector"], args["text"], timeout=10000)
-            return f"已在 {args['selector']} 输入: {args['text']}"
+            _page.fill(args.get("selector", ""), args.get("text", ""), timeout=10000)
+            return f"已在 {args.get('selector')} 输入: {args.get('text')}"
 
         elif action == "read":
-            html = _page.content()
-            text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.I)
-            text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.I)
-            text = re.sub(r"<[^>]+>", "\n", text)
-            text = re.sub(r"\n{3,}", "\n\n", text)
+            text = self._extract_text(_page.content())
             return text[:30000]
 
         elif action == "screenshot":
@@ -102,4 +81,34 @@ class WebDo(Tool):
             _page.screenshot(path=path, full_page=True)
             return f"截图已保存到 {path}"
 
-        return f"ERROR: 未知动作 {action}"
+        return f"ERROR: 未知 action: {action}"
+
+    @staticmethod
+    def _extract_text(html: str) -> str:
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.I)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.I)
+        text = re.sub(r"<[^>]+>", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text
+
+    def _list_elements(self) -> str:
+        """提取页面输入框和按钮，生成可用 CSS 选择器"""
+        global _page
+        try:
+            items = _page.evaluate("""() => {
+                const els = document.querySelectorAll('input:not([type=hidden]), button, select, textarea, a.btn, a[role=button]');
+                return Array.from(els).slice(0, 30).map(el => {
+                    const id = el.id ? '#' + el.id : '';
+                    const nodename = el.nodeName.toLowerCase();
+                    const name = el.name ? nodename + '[name="' + el.name + '"]' : '';
+                    const cls = '.' + (el.className || '').trim().split(/\\s+/g).slice(0, 2).join('.');
+                    const sel = id || name || cls || nodename;
+                    const type = el.getAttribute('type') || nodename;
+                    const placeholder = el.getAttribute('placeholder') || '';
+                    const text = (el.textContent || el.value || '').trim().slice(0, 30);
+                    return sel + '  [' + type + ']  ' + (placeholder ? 'placeholder="' + placeholder + '"  ' : '') + text;
+                });
+            }""")
+            return "\n".join(items) if items else "(无表单元素)"
+        except Exception as e:
+            return f"(提取元素失败: {e})"
