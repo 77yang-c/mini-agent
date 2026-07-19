@@ -5,12 +5,19 @@
 ## 准备
 
 1. 安装并启动 Ollama  
-2. 确认模型：`ollama list`（需有 `deepseek-r1:7b`）  
+2. 确认模型：`ollama list`（需有 `deepseek-r1:7b`或`qwen2.5:7b`或者更高）  
 3. 安装依赖：
 
 ```powershell
 cd C:\Users\ycq\mini-agent
 pip install -r requirements.txt
+```
+
+4. （可选）浏览网页功能需要 Playwright：
+
+```powershell
+pip install playwright
+python -m playwright install chromium
 ```
 
 ## 运行
@@ -42,4 +49,3 @@ python cli.py --session last
 ```powershell
 $env:MINI_AGENT_MODEL = "deepseek-r1:7b"
 # 或换云端时改 base_url + api_key
-```
