@@ -5,6 +5,7 @@ from tools.base import Registry
 from tools.fs import ReadFile
 from tools.web import WebTool
 from tools.writefile import WriteFile
+from session import SessionStore
 
 def build_registry() -> Registry:
     reg = Registry()
@@ -105,12 +106,24 @@ def parse_tool_calls(text: str):
             pass
     return calls
 
-def run_agent(user_text: str):
+def run_agent(user_text: str, session_id: str = None):
+    stote = SessionStore("sessions")
     reg = build_registry()
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
+    #恢复历史消息
+    if session_id:
+        try:
+            messages = stote.load(session_id)
+            messages.append({"role":"user","content":user_text})
+        except FileNotFoundError:
+            messages = [
+                {"role":"system","content":SYSTEM_PROMPT},
+                {"role":"user","content":user_text},
+            ]
+    else:
+        messages = [
+            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"user","content":user_text},
+        ]
 
     for turn in range(20):
         msg = chat(messages, tools=reg.schema())
@@ -161,3 +174,6 @@ def run_agent(user_text: str):
                 "tool_call_id": tc.get("id", name),
                 "content": result,
             })
+    #保存
+    if session_id:
+        stote.save(session_id, messages)

@@ -5,5 +5,12 @@ if __name__ == "__main__":
         user_text = input("you> ").strip()
         if user_text in ("q", "quit", "exit"):
             break
-        if user_text:
-            run_agent(user_text)
+        if not user_text:
+            continue
+        if user_text in ("new", "newsession"):
+            print("新对话已开启，请输入内容")
+            session_id = None
+            continue
+        else:
+            session_id = "last"
+        run_agent(user_text, session_id=session_id)
