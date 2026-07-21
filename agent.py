@@ -6,6 +6,7 @@ from tools.fs import ReadFile
 from tools.web import WebTool
 from tools.writefile import WriteFile
 from session import SessionStore
+from memory.long_term import LongMemory
 
 def build_registry() -> Registry:
     reg = Registry()
@@ -107,8 +108,21 @@ def parse_tool_calls(text: str):
     return calls
 
 def run_agent(user_text: str, session_id: str = None):
-    stote = SessionStore("sessions")
+    stote = SessionStore("sessions")#短期记忆，恢复历史消息
+
     reg = build_registry()
+
+    lmem = LongMemory()  # 长期记忆
+
+    # ── 注入时机：每轮对话前检索相关记忆 ──
+    recalled = ""
+    try:
+        memories = lmem.recall(user_text)
+        if memories:
+            recalled = "\n[历史相关经验]\n" + "\n".join(f"- {m}" for m in memories)
+    except Exception:
+        pass  # 首次使用模型未下载完成时忽略
+
     #恢复历史消息
     if session_id:
         try:
@@ -116,20 +130,28 @@ def run_agent(user_text: str, session_id: str = None):
             messages.append({"role":"user","content":user_text})
         except FileNotFoundError:
             messages = [
-                {"role":"system","content":SYSTEM_PROMPT},
+                {"role":"system","content":SYSTEM_PROMPT + recalled},
                 {"role":"user","content":user_text},
             ]
     else:
         messages = [
-            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"system","content":SYSTEM_PROMPT + recalled},
             {"role":"user","content":user_text},
         ]
 
     for turn in range(20):
+        messages = trim_messages(messages)#短期会话裁剪
         msg = chat(messages, tools=reg.schema())
         messages.append(msg)
 
         content = msg.get("content") or ""
+
+        # ── 触发1：用户明确说"记住" → 写入长期记忆 ──
+        if content and "记住" in user_text:
+            try:
+                lmem.remember(user_text, tags=["user_cmd"])
+            except Exception:
+                pass
 
         # 优先用原生 tool_calls
         tool_calls_raw = msg.get("tool_calls") or []
@@ -168,12 +190,40 @@ def run_agent(user_text: str, session_id: str = None):
                 result = reg.call(name, arguments)
             except Exception as e:
                 result = f"工具执行出错: {str(e)}"
+                # ── 触发2：工具出错 → 记录错误经验 ──
+                try:
+                    lmem.remember(f"[错误] 工具:{name} 参数:{arguments} 错误:{e}", tags=["error"])
+                except Exception:
+                    pass
             print(f"[tool] {name} -> {result[:200]}")
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", name),
                 "content": result,
             })
+
+    # ── 触发3：对话结束 → LLM 总结值得记住的内容 ──
+    if session_id:
+        has_tools = any(m.get("role") == "tool" for m in messages)
+        if has_tools:
+            try:
+                msgs = messages[:1] + [{"role":"user","content":"用一句话中文总结本次对话中值得记住的用户偏好、操作习惯或重要信息。不超过50字。"}]
+                summary = chat(msgs).get("content","")
+                if summary and len(summary) > 5:
+                    lmem.remember(summary, tags=["auto_summary"])
+            except Exception:
+                pass
+
     #保存
     if session_id:
         stote.save(session_id, messages)
+
+
+
+#短期记忆裁剪
+def trim_messages(messages, max_tokens=6000):
+    total = sum(len(str(m.get("content","")))for m in messages)
+    while total > max_tokens*1.5 and len(messages) > 3:
+        removed = messages.pop(1)
+        total -= len(str(removed.get("content","")))
+    return messages
