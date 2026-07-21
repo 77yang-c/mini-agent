@@ -49,6 +49,16 @@ python cli.py "new"
 | `tools/*` | 读改文件、grep、shell |
 | `memory/long_term.py` | 长期记忆(向量检索) |
 
+## 记忆
+
+| 类型 | 实现 | 说明 |
+|------|------|------|
+| 短期 | `session.py` → JSON | 对话历史持久化，续聊恢复 |
+| 裁剪 | `trim_messages()` | 超 6000 token 自动裁旧消息 |
+| 长期 | ChromaDB + MiniLM | 向量检索历史经验，含错误记录/自动总结 |
+
+长记忆 3 个触发点：用户说"记住"、工具出错、对话结束 LLM 自动总结。
+
 ## 换模型
 
 ```powershell
